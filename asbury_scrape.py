@@ -75,23 +75,35 @@ def make_session():
     s = requests.Session()
     s.headers.update({
         "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
     })
     return s
 
 
 def get(session, url, timeout=30, retries=2):
+    """Returns html or None. Records why it failed on session.last_diag."""
     for i in range(retries + 1):
         try:
-            r = session.get(url, timeout=timeout)
+            r = session.get(url, timeout=timeout, allow_redirects=True)
+            session.last_diag = (f"HTTP {r.status_code} len={len(r.text)} "
+                                 f"server={r.headers.get('server','?')}")
             if r.status_code == 200:
                 return r.text
-            if r.status_code in (403, 429):
+            if r.status_code in (403, 429, 503):
                 time.sleep(2 * (i + 1))
                 continue
             return None
-        except requests.RequestException:
+        except requests.RequestException as e:
+            session.last_diag = f"{type(e).__name__}: {str(e)[:90]}"
             if i == retries:
                 return None
             time.sleep(1.5 * (i + 1))
@@ -354,6 +366,8 @@ def scrape_rooftop(rt):
             rows = [jsonld_to_row(r, rt, lbl if lbl != "All" else "") for r, lbl in found.values()]
             detail = "jsonld-fallback"
         status = "OK" if rows else "EMPTY"
+        if not rows:
+            detail = getattr(session, "last_diag", "no response")
     except Exception as e:  # noqa: BLE001
         status = "ERROR"
         detail = f"{type(e).__name__}: {e}"[:160]
@@ -403,6 +417,42 @@ def fingerprint(rt):
     return out
 
 
+
+# --------------------------------------------------------------------------
+# probe mode — raw HTTP diagnostics, no parsing
+# --------------------------------------------------------------------------
+def probe(rt):
+    session = make_session()
+    dom = rt["Domain"]
+    lines = []
+    for label, path in [("root", "/")] + DDC_PATHS:
+        url = f"https://www.{dom}{path}"
+        code = length = srv = ""
+        note = ""
+        try:
+            r = session.get(url, timeout=25, allow_redirects=True)
+            code = r.status_code
+            length = len(r.text)
+            srv = r.headers.get("server", "?")
+            if r.status_code == 200:
+                n = len(pull_ddc_inventory(r.text))
+                j = len(pull_jsonld_vehicles(r.text))
+                note = f"ddc={n} jsonld={j}"
+                if "cf-browser-verification" in r.text or "Just a moment" in r.text:
+                    note += " CHALLENGE"
+            if r.history:
+                note += f" redir->{r.url[:60]}"
+        except requests.RequestException as e:
+            code = type(e).__name__
+            note = str(e)[:70]
+        lines.append(f"    {path:32s} {str(code):>18s} len={str(length):>7s} "
+                     f"srv={srv:<12s} {note}")
+    print(f"{rt['Rooftop']} ({dom})", flush=True)
+    for l in lines:
+        print(l, flush=True)
+    return {"Rooftop": rt["Rooftop"], "Domain": dom, "report": " | ".join(x.strip() for x in lines)}
+
+
 # --------------------------------------------------------------------------
 # manifest / output
 # --------------------------------------------------------------------------
@@ -435,7 +485,7 @@ def write_csv(path, rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["scrape", "fingerprint"])
+    ap.add_argument("mode", choices=["scrape", "fingerprint", "probe"])
     ap.add_argument("--group", help="only this sub-group")
     ap.add_argument("--limit", type=int, help="cap rooftops (smoke test)")
     ap.add_argument("--workers", type=int, default=6)
@@ -449,6 +499,18 @@ def main():
 
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     OUTDIR.mkdir(parents=True, exist_ok=True)
+
+    if args.mode == "probe":
+        res = []
+        with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            res = list(ex.map(probe, manifest))
+        p = OUTDIR / f"probe_{run_date}.csv"
+        with open(p, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["Rooftop", "Domain", "report"])
+            w.writeheader()
+            w.writerows(res)
+        print(f"\nWrote {p}")
+        return
 
     if args.mode == "fingerprint":
         res = []
