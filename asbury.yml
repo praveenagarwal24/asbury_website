@@ -1,0 +1,67 @@
+name: Asbury Inventory Scrape
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "scrape (full run) or fingerprint (probe platforms)"
+        type: choice
+        options: [scrape, fingerprint]
+        default: scrape
+      group:
+        description: "Limit to one sub-group (blank = all 133 rooftops)"
+        type: string
+        default: ""
+      limit:
+        description: "Cap rooftop count (blank = no cap; use 3 for a smoke test)"
+        type: string
+        default: ""
+      workers:
+        description: "Parallel workers"
+        type: string
+        default: "6"
+      upload:
+        description: "Upload results to Google Drive"
+        type: boolean
+        default: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        run: |
+          ARGS="${{ inputs.mode }} --workers ${{ inputs.workers }}"
+          if [ -n "${{ inputs.group }}" ]; then ARGS="$ARGS --group ${{ inputs.group }}"; fi
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          echo "Running: python asbury_scrape.py $ARGS"
+          python asbury_scrape.py $ARGS
+
+      - name: Upload to Google Drive
+        if: ${{ inputs.upload }}
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          DRIVE_SUBFOLDER: asbury_${{ github.run_number }}
+        run: python upload_to_drive.py
+
+      - name: Keep artifacts too
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asbury-csv-${{ github.run_number }}
+          path: output/*.csv
+          if-no-files-found: warn
+          retention-days: 30
