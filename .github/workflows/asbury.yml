@@ -6,7 +6,7 @@ on:
       mode:
         description: "scrape (full run) or fingerprint (probe platforms)"
         type: choice
-        options: [scrape, fingerprint]
+        options: [scrape, fingerprint, probe]
         default: scrape
       group:
         description: "Limit to one sub-group (blank = all 133 rooftops)"
